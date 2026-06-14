@@ -12,12 +12,27 @@ const simpleHash = (text: string): string => {
   return crypto.createHash("sha256").update(text).digest("hex");
 };
 
+// Wrapper to catch async errors in route handlers
+const asyncHandler = (fn: any) => (req: any, res: any, next: any) => {
+  Promise.resolve(fn(req, res, next)).catch(next);
+};
+
 async function seedDatabase() {
   try {
     const { data: users, error: usersError } = await supabase
       .from("users")
       .select("*");
-    if (usersError) throw usersError;
+
+    // Handle table not found error (PGRST205) gracefully
+    if (usersError) {
+      if (usersError.code === "PGRST205") {
+        console.log(
+          "Tables not yet created in Supabase. This is expected on first run.",
+        );
+        return; // Don't try to seed if tables don't exist
+      }
+      throw usersError;
+    }
 
     if (!users || users.length === 0) {
       console.log("Seeding initial users to Supabase...");
@@ -87,8 +102,13 @@ async function ensureDbSeeded() {
 
 // Lazy-seed database middleware
 app.use(async (req, res, next) => {
-  await ensureDbSeeded();
-  next();
+  try {
+    await ensureDbSeeded();
+    next();
+  } catch (err) {
+    console.error("Middleware error:", err);
+    next();
+  }
 });
 
 // --- API ROUTES ---
@@ -391,7 +411,9 @@ apiRouter.get("/winning-patterns", async (req, res) => {
       .select("value")
       .eq("key", "enabled_winning_patterns")
       .single();
-    if (error && error.code !== "PGRST116") throw error;
+    // PGRST116 = record not found, PGRST205 = table not found - both are OK for fallback
+    if (error && error.code !== "PGRST116" && error.code !== "PGRST205")
+      throw error;
     if (setting) {
       try {
         const patterns = JSON.parse(setting.value);
@@ -462,5 +484,13 @@ apiRouter.post("/game-logs/clear", async (req, res) => {
 
 app.use("/api", apiRouter);
 app.use("/", apiRouter);
+
+// Global error handler for unhandled errors
+app.use((err: any, req: any, res: any, next: any) => {
+  console.error("Unhandled server error:", err);
+  res
+    .status(500)
+    .json({ error: "Internal server error", details: err?.message });
+});
 
 export default app;
