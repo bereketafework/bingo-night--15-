@@ -15,7 +15,7 @@ const simpleHash = (text: string): string => {
 async function seedDatabase() {
   try {
     const { data: users, error: usersError } = await supabase
-      .from("user")
+      .from("users")
       .select("*");
     if (usersError) throw usersError;
 
@@ -32,19 +32,19 @@ async function seedDatabase() {
         { name: "manager2", role: "manager", password: simpleHash("pass123") },
       ];
       const { error: insertError } = await supabase
-        .from("user")
+        .from("users")
         .insert(usersToSeed);
       if (insertError) throw insertError;
     }
 
     const { data: settings, error: settingsError } = await supabase
-      .from("setting")
+      .from("settings")
       .select("*");
     if (settingsError) throw settingsError;
 
     if (!settings || settings.length === 0) {
       console.log("Seeding initial settings to Supabase...");
-      const { error: insertError } = await supabase.from("setting").insert([
+      const { error: insertError } = await supabase.from("settings").insert([
         {
           key: "winner_prize_percentage",
           value: "0.7",
@@ -99,7 +99,7 @@ const apiRouter = express.Router();
 apiRouter.get("/users", async (req, res) => {
   try {
     const role = req.query.role as string;
-    let query = supabase.from("user").select("id, name, role");
+    let query = supabase.from("users").select("id, name, role");
     if (role) {
       query = query.eq("role", role);
     }
@@ -147,7 +147,7 @@ apiRouter.post("/auth/login", async (req, res) => {
     }
 
     const { data: user, error } = await supabase
-      .from("user")
+      .from("users")
       .select("*")
       .eq("name", name)
       .single();
@@ -197,7 +197,7 @@ apiRouter.get("/game-logs", async (req, res) => {
     const period = req.query.period as string;
     const managerId = req.query.managerId as string;
 
-    let query = supabase.from("gameLog").select("*");
+    let query = supabase.from("game_logs").select("*");
 
     if (period && period !== "all") {
       const days = period === "7d" ? 7 : 30;
@@ -240,7 +240,7 @@ apiRouter.post("/game-logs", async (req, res) => {
       return res.status(400).json({ error: "Log data is required" });
     }
 
-    const { error } = await supabase.from("gameLog").insert({
+    const { error } = await supabase.from("game_logs").insert({
       game_id: log.gameId,
       start_time: log.startTime,
       manager_id: log.managerId,
@@ -265,7 +265,7 @@ apiRouter.get("/settings/:key", async (req, res) => {
       return res.json({ value: null, warning: "Database not configured yet" });
     }
     const { data: setting, error } = await supabase
-      .from("setting")
+      .from("settings")
       .select("value")
       .eq("key", key)
       .single();
@@ -300,7 +300,7 @@ apiRouter.post("/settings", async (req, res) => {
     }
 
     const { data: existing, error: checkError } = await supabase
-      .from("setting")
+      .from("settings")
       .select("key")
       .eq("key", key)
       .single();
@@ -309,12 +309,12 @@ apiRouter.post("/settings", async (req, res) => {
 
     if (existing) {
       const { error } = await supabase
-        .from("setting")
+        .from("settings")
         .update({ value, updated_at: new Date().toISOString() })
         .eq("key", key);
       if (error) throw error;
     } else {
-      const { error } = await supabase.from("setting").insert({
+      const { error } = await supabase.from("settings").insert({
         key,
         value,
         updated_at: new Date().toISOString(),
@@ -346,7 +346,7 @@ apiRouter.post("/users", async (req, res) => {
     }
 
     const { data: existing, error: checkError } = await supabase
-      .from("user")
+      .from("users")
       .select("name")
       .eq("name", name)
       .single();
@@ -357,7 +357,7 @@ apiRouter.post("/users", async (req, res) => {
     }
 
     const hashedPassword = simpleHash(password);
-    const { error } = await supabase.from("user").insert({
+    const { error } = await supabase.from("users").insert({
       name,
       password: hashedPassword,
       role,
@@ -387,7 +387,7 @@ apiRouter.get("/winning-patterns", async (req, res) => {
       ]);
     }
     const { data: setting, error } = await supabase
-      .from("setting")
+      .from("settings")
       .select("value")
       .eq("key", "enabled_winning_patterns")
       .single();
@@ -436,7 +436,7 @@ apiRouter.post("/game-logs/clear", async (req, res) => {
       const date = new Date();
       date.setDate(date.getDate() - parseInt(olderThanDays));
       const { error, count } = await supabase
-        .from("gameLog")
+        .from("game_logs")
         .delete()
         .lt("created_at", date.toISOString())
         .select("*", { count: "exact" });
@@ -444,7 +444,7 @@ apiRouter.post("/game-logs/clear", async (req, res) => {
       deletedCount = count || 0;
     } else {
       const { error, count } = await supabase
-        .from("gameLog")
+        .from("game_logs")
         .delete()
         .gte("created_at", "1900-01-01")
         .select("*", { count: "exact" });
