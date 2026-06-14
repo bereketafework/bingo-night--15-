@@ -55,7 +55,17 @@ async function seedDatabase() {
     const { data: settings, error: settingsError } = await supabase
       .from("settings")
       .select("*");
-    if (settingsError) throw settingsError;
+
+    // Handle table not found error for settings too
+    if (settingsError) {
+      if (settingsError.code === "PGRST205") {
+        console.log(
+          "Settings table not yet created in Supabase. This is expected on first run.",
+        );
+        return; // Don't try to seed if tables don't exist
+      }
+      throw settingsError;
+    }
 
     if (!settings || settings.length === 0) {
       console.log("Seeding initial settings to Supabase...");
@@ -124,7 +134,8 @@ apiRouter.get("/users", async (req, res) => {
       query = query.eq("role", role);
     }
     const { data: users, error } = await query;
-    if (error) throw error;
+    // PGRST205 = table not found, which is OK for uninitialized databases
+    if (error && error.code !== "PGRST205") throw error;
     res.json(users || []);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -172,6 +183,7 @@ apiRouter.post("/auth/login", async (req, res) => {
       .eq("name", name)
       .single();
 
+    // PGRST205 = table not found, PGRST116 = record not found - both mean user doesn't exist
     if (error || !user) {
       return res.status(401).json({ error: "Invalid username or password" });
     }
@@ -233,7 +245,8 @@ apiRouter.get("/game-logs", async (req, res) => {
     const { data: logs, error } = await query.order("created_at", {
       ascending: false,
     });
-    if (error) throw error;
+    // PGRST205 = table not found, which is OK for uninitialized databases
+    if (error && error.code !== "PGRST205") throw error;
 
     const mappedLogs = (logs || []).map((log: any) => ({
       gameId: log.game_id,
@@ -270,7 +283,8 @@ apiRouter.post("/game-logs", async (req, res) => {
       called_numbers_sequence: log.calledNumbersSequence,
       winner: log.winner ?? null,
     });
-    if (error) throw error;
+    // PGRST205 = table not found, which is OK for uninitialized databases
+    if (error && error.code !== "PGRST205") throw error;
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -289,7 +303,9 @@ apiRouter.get("/settings/:key", async (req, res) => {
       .select("value")
       .eq("key", key)
       .single();
-    if (error && error.code !== "PGRST116") throw error;
+    // PGRST205 = table not found, PGRST116 = record not found - both are OK
+    if (error && error.code !== "PGRST116" && error.code !== "PGRST205")
+      throw error;
     res.json({ value: setting ? setting.value : null });
   } catch (err: any) {
     console.error(
@@ -325,7 +341,13 @@ apiRouter.post("/settings", async (req, res) => {
       .eq("key", key)
       .single();
 
-    if (checkError && checkError.code !== "PGRST116") throw checkError;
+    // PGRST205 = table not found, PGRST116 = record not found - both are OK
+    if (
+      checkError &&
+      checkError.code !== "PGRST116" &&
+      checkError.code !== "PGRST205"
+    )
+      throw checkError;
 
     if (existing) {
       const { error } = await supabase
@@ -371,7 +393,13 @@ apiRouter.post("/users", async (req, res) => {
       .eq("name", name)
       .single();
 
-    if (checkError && checkError.code !== "PGRST116") throw checkError;
+    // PGRST205 = table not found, PGRST116 = record not found - both are OK
+    if (
+      checkError &&
+      checkError.code !== "PGRST116" &&
+      checkError.code !== "PGRST205"
+    )
+      throw checkError;
     if (existing) {
       return res.json({ success: false, message: "Username already exists." });
     }
@@ -396,8 +424,55 @@ apiRouter.post("/users", async (req, res) => {
 // GET currently enabled winning patterns
 apiRouter.get("/winning-patterns", async (req, res) => {
   try {
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
-      return res.json([
+    const fallbackPatterns = [
+      "Any Line",
+      "Two Lines",
+      "X Pattern",
+      "Rectangle",
+      "Four Corners",
+      "Full House",
+    ];
+
+    if (
+      !process.env.NEXT_PUBLIC_SUPABASE_URL ||
+      !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+    ) {
+      return res.json(fallbackPatterns);
+    }
+
+    try {
+      const { data: setting, error } = await supabase
+        .from("settings")
+        .select("value")
+        .eq("key", "enabled_winning_patterns")
+        .single();
+
+      // PGRST116 = record not found, PGRST205 = table not found - both are OK for fallback
+      if (error && error.code !== "PGRST116" && error.code !== "PGRST205") {
+        console.error("Supabase query error:", error);
+        return res.json(fallbackPatterns);
+      }
+
+      if (setting?.value) {
+        try {
+          const patterns = JSON.parse(setting.value);
+          if (Array.isArray(patterns) && patterns.length > 0) {
+            return res.json(patterns);
+          }
+        } catch (parseErr) {
+          console.error("Failed to parse winning patterns:", parseErr);
+        }
+      }
+    } catch (dbErr) {
+      console.error("Database connection error:", dbErr);
+    }
+
+    return res.json(fallbackPatterns);
+  } catch (err: any) {
+    console.error("Unexpected error in winning-patterns endpoint:", err);
+    res
+      .status(200)
+      .json([
         "Any Line",
         "Two Lines",
         "X Pattern",
@@ -405,46 +480,6 @@ apiRouter.get("/winning-patterns", async (req, res) => {
         "Four Corners",
         "Full House",
       ]);
-    }
-    const { data: setting, error } = await supabase
-      .from("settings")
-      .select("value")
-      .eq("key", "enabled_winning_patterns")
-      .single();
-    // PGRST116 = record not found, PGRST205 = table not found - both are OK for fallback
-    if (error && error.code !== "PGRST116" && error.code !== "PGRST205")
-      throw error;
-    if (setting) {
-      try {
-        const patterns = JSON.parse(setting.value);
-        if (Array.isArray(patterns)) {
-          return res.json(patterns);
-        }
-      } catch (e) {
-        console.error("Parsing winning patterns failed:", e);
-      }
-    }
-    res.json([
-      "Any Line",
-      "Two Lines",
-      "X Pattern",
-      "Rectangle",
-      "Four Corners",
-      "Full House",
-    ]);
-  } catch (err: any) {
-    console.error(
-      "Database query failed for winning patterns, returning fallback defaults:",
-      err,
-    );
-    res.json([
-      "Any Line",
-      "Two Lines",
-      "X Pattern",
-      "Rectangle",
-      "Four Corners",
-      "Full House",
-    ]);
   }
 });
 
