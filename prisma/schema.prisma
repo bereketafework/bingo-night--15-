@@ -1,0 +1,39 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id       String @id @default(uuid())
+  name     String @unique
+  password String
+  role     String
+
+  @@map("users")
+}
+
+model GameLog {
+  id                     Int      @id @default(autoincrement())
+  created_at             DateTime @default(now()) @map("created_at")
+  game_id                String   @map("game_id")
+  start_time             String   @map("start_time")
+  manager_id             String   @map("manager_id")
+  manager_name           String   @map("manager_name")
+  settings               Json     @map("settings")
+  players                Json     @map("players")
+  called_numbers_sequence Json    @map("called_numbers_sequence")
+  winner                 Json?    @map("winner")
+
+  @@map("game_logs")
+}
+
+model Setting {
+  key        String   @id @map("key")
+  value      String   @map("value")
+  updated_at DateTime @default(now()) @map("updated_at")
+
+  @@map("settings")
+}
