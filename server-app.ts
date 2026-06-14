@@ -1,15 +1,12 @@
 import express from "express";
-import { PrismaClient } from "@prisma/client";
-import pg from "pg";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 import "dotenv/config";
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL || process.env.DIRECT_URL,
-});
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "",
+);
 
 const simpleHash = (text: string): string => {
   return crypto.createHash("sha256").update(text).digest("hex");
@@ -17,39 +14,56 @@ const simpleHash = (text: string): string => {
 
 async function seedDatabase() {
   try {
-    const userCount = await prisma.user.count();
-    if (userCount === 0) {
-      console.log("Seeding initial users to Postgres...");
+    const { data: users, error: usersError } = await supabase
+      .from("user")
+      .select("*");
+    if (usersError) throw usersError;
+
+    if (!users || users.length === 0) {
+      console.log("Seeding initial users to Supabase...");
       const usersToSeed = [
-        { name: "superadmin", role: "super_admin", pass: "superadmin123" },
-        { name: "admin", role: "admin", pass: "admin123" },
-        { name: "manager1", role: "manager", pass: "pass123" },
-        { name: "manager2", role: "manager", pass: "pass123" },
+        {
+          name: "superadmin",
+          role: "super_admin",
+          password: simpleHash("superadmin123"),
+        },
+        { name: "admin", role: "admin", password: simpleHash("admin123") },
+        { name: "manager1", role: "manager", password: simpleHash("pass123") },
+        { name: "manager2", role: "manager", password: simpleHash("pass123") },
       ];
-      for (const u of usersToSeed) {
-        await prisma.user.create({
-          data: {
-            name: u.name,
-            role: u.role,
-            password: simpleHash(u.pass),
-          },
-        });
-      }
+      const { error: insertError } = await supabase
+        .from("user")
+        .insert(usersToSeed);
+      if (insertError) throw insertError;
     }
 
-    const settingsCount = await prisma.setting.count();
-    if (settingsCount === 0) {
-      console.log("Seeding initial settings to Postgres...");
-      await prisma.setting.createMany({
-        data: [
-          { key: "winner_prize_percentage", value: "0.7", updated_at: new Date() },
-          {
-            key: "enabled_winning_patterns",
-            value: JSON.stringify(["Any Line", "Two Lines", "X Pattern", "Rectangle", "Four Corners", "Full House"]),
-            updated_at: new Date(),
-          },
-        ],
-      });
+    const { data: settings, error: settingsError } = await supabase
+      .from("setting")
+      .select("*");
+    if (settingsError) throw settingsError;
+
+    if (!settings || settings.length === 0) {
+      console.log("Seeding initial settings to Supabase...");
+      const { error: insertError } = await supabase.from("setting").insert([
+        {
+          key: "winner_prize_percentage",
+          value: "0.7",
+          updated_at: new Date().toISOString(),
+        },
+        {
+          key: "enabled_winning_patterns",
+          value: JSON.stringify([
+            "Any Line",
+            "Two Lines",
+            "X Pattern",
+            "Rectangle",
+            "Four Corners",
+            "Full House",
+          ]),
+          updated_at: new Date().toISOString(),
+        },
+      ]);
+      if (insertError) throw insertError;
     }
     console.log("Database seed successfully checked.");
   } catch (err) {
@@ -85,15 +99,13 @@ const apiRouter = express.Router();
 apiRouter.get("/users", async (req, res) => {
   try {
     const role = req.query.role as string;
-    const users = await prisma.user.findMany({
-      where: role ? { role } : undefined,
-      select: {
-        id: true,
-        name: true,
-        role: true,
-      },
-    });
-    res.json(users);
+    let query = supabase.from("user").select("id, name, role");
+    if (role) {
+      query = query.eq("role", role);
+    }
+    const { data: users, error } = await query;
+    if (error) throw error;
+    res.json(users || []);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -104,32 +116,43 @@ apiRouter.post("/auth/login", async (req, res) => {
   try {
     const { name, password } = req.body;
     if (!name || !password) {
-      return res.status(400).json({ error: "Username and password are required" });
+      return res
+        .status(400)
+        .json({ error: "Username and password are required" });
     }
 
-    if (!process.env.DATABASE_URL && !process.env.DIRECT_URL) {
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
       // In-memory fallback if DB is not configured
       const localUsers: Record<string, string> = {
-        "superadmin": "superadmin123",
-        "admin": "admin123",
-        "manager1": "pass123",
-        "manager2": "pass123"
+        superadmin: "superadmin123",
+        admin: "admin123",
+        manager1: "pass123",
+        manager2: "pass123",
       };
       if (localUsers[name] === password) {
         return res.json({
           id: `local-${name}`,
           name: name,
-          role: name === "superadmin" ? "super_admin" : (name === "admin" ? "admin" : "manager")
+          role:
+            name === "superadmin"
+              ? "super_admin"
+              : name === "admin"
+                ? "admin"
+                : "manager",
         });
       }
-      return res.status(401).json({ error: "Invalid username or password (DB offline)" });
+      return res
+        .status(401)
+        .json({ error: "Invalid username or password (DB offline)" });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { name },
-    });
+    const { data: user, error } = await supabase
+      .from("user")
+      .select("*")
+      .eq("name", name)
+      .single();
 
-    if (!user) {
+    if (error || !user) {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
@@ -144,19 +167,24 @@ apiRouter.post("/auth/login", async (req, res) => {
       res.status(401).json({ error: "Invalid username or password" });
     }
   } catch (err: any) {
-    // If Prisma db query fails, fallback to local users as well to prevent total lockout
+    // If Supabase db query fails, fallback to local users as well to prevent total lockout
     const { name, password } = req.body;
     const localUsers: Record<string, string> = {
-      "superadmin": "superadmin123",
-      "admin": "admin123",
-      "manager1": "pass123",
-      "manager2": "pass123"
+      superadmin: "superadmin123",
+      admin: "admin123",
+      manager1: "pass123",
+      manager2: "pass123",
     };
     if (localUsers[name] === password) {
       return res.json({
         id: `local-${name}`,
         name: name,
-        role: name === "superadmin" ? "super_admin" : (name === "admin" ? "admin" : "manager")
+        role:
+          name === "superadmin"
+            ? "super_admin"
+            : name === "admin"
+              ? "admin"
+              : "manager",
       });
     }
     res.status(500).json({ error: err.message });
@@ -169,29 +197,25 @@ apiRouter.get("/game-logs", async (req, res) => {
     const period = req.query.period as string;
     const managerId = req.query.managerId as string;
 
-    let whereClause: any = {};
+    let query = supabase.from("gameLog").select("*");
 
     if (period && period !== "all") {
       const days = period === "7d" ? 7 : 30;
       const filterDate = new Date();
       filterDate.setDate(filterDate.getDate() - days);
-      whereClause.created_at = {
-        gte: filterDate,
-      };
+      query = query.gte("created_at", filterDate.toISOString());
     }
 
     if (managerId && managerId !== "all") {
-      whereClause.manager_id = managerId;
+      query = query.eq("manager_id", managerId);
     }
 
-    const logs = await prisma.gameLog.findMany({
-      where: whereClause,
-      orderBy: {
-        created_at: "desc",
-      },
+    const { data: logs, error } = await query.order("created_at", {
+      ascending: false,
     });
+    if (error) throw error;
 
-    const mappedLogs = logs.map((log) => ({
+    const mappedLogs = (logs || []).map((log: any) => ({
       gameId: log.game_id,
       startTime: log.start_time,
       managerId: log.manager_id,
@@ -216,18 +240,17 @@ apiRouter.post("/game-logs", async (req, res) => {
       return res.status(400).json({ error: "Log data is required" });
     }
 
-    await prisma.gameLog.create({
-      data: {
-        game_id: log.gameId,
-        start_time: log.startTime,
-        manager_id: log.managerId,
-        manager_name: log.managerName,
-        settings: log.settings,
-        players: log.players,
-        called_numbers_sequence: log.calledNumbersSequence,
-        winner: log.winner ?? undefined,
-      },
+    const { error } = await supabase.from("gameLog").insert({
+      game_id: log.gameId,
+      start_time: log.startTime,
+      manager_id: log.managerId,
+      manager_name: log.managerName,
+      settings: log.settings,
+      players: log.players,
+      called_numbers_sequence: log.calledNumbersSequence,
+      winner: log.winner ?? null,
     });
+    if (error) throw error;
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -238,16 +261,25 @@ apiRouter.post("/game-logs", async (req, res) => {
 apiRouter.get("/settings/:key", async (req, res) => {
   try {
     const { key } = req.params;
-    if (!process.env.DATABASE_URL && !process.env.DIRECT_URL) {
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
       return res.json({ value: null, warning: "Database not configured yet" });
     }
-    const setting = await prisma.setting.findUnique({
-      where: { key },
-    });
+    const { data: setting, error } = await supabase
+      .from("setting")
+      .select("value")
+      .eq("key", key)
+      .single();
+    if (error && error.code !== "PGRST116") throw error;
     res.json({ value: setting ? setting.value : null });
   } catch (err: any) {
-    console.error(`Failed to fetch setting ${req.params.key}, returning null:`, err);
-    res.json({ value: null, warning: "Database connection failed, using offline fallback" });
+    console.error(
+      `Failed to fetch setting ${req.params.key}, returning null:`,
+      err,
+    );
+    res.json({
+      value: null,
+      warning: "Database connection failed, using offline fallback",
+    });
   }
 });
 
@@ -259,15 +291,36 @@ apiRouter.post("/settings", async (req, res) => {
       return res.status(400).json({ error: "Key and value are required" });
     }
 
-    if (!process.env.DATABASE_URL && !process.env.DIRECT_URL) {
-      return res.json({ success: true, warning: "Database not configured yet, setting saved in memory (offline mock)" });
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return res.json({
+        success: true,
+        warning:
+          "Database not configured yet, setting saved in memory (offline mock)",
+      });
     }
 
-    await prisma.setting.upsert({
-      where: { key },
-      update: { value, updated_at: new Date() },
-      create: { key, value, updated_at: new Date() },
-    });
+    const { data: existing, error: checkError } = await supabase
+      .from("setting")
+      .select("key")
+      .eq("key", key)
+      .single();
+
+    if (checkError && checkError.code !== "PGRST116") throw checkError;
+
+    if (existing) {
+      const { error } = await supabase
+        .from("setting")
+        .update({ value, updated_at: new Date().toISOString() })
+        .eq("key", key);
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from("setting").insert({
+        key,
+        value,
+        updated_at: new Date().toISOString(),
+      });
+      if (error) throw error;
+    }
     res.json({ success: true });
   } catch (err: any) {
     console.error(`Failed to save setting ${req.body.key}:`, err);
@@ -280,27 +333,41 @@ apiRouter.post("/users", async (req, res) => {
   try {
     const { name, password, role } = req.body;
     if (!name || !password || !role) {
-      return res.status(400).json({ error: "Username, password and role are required" });
+      return res
+        .status(400)
+        .json({ error: "Username, password and role are required" });
     }
 
-    if (!process.env.DATABASE_URL && !process.env.DIRECT_URL) {
-      return res.json({ success: false, message: "Database is not configured. Cannot create permanent users." });
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return res.json({
+        success: false,
+        message: "Database is not configured. Cannot create permanent users.",
+      });
     }
 
-    const existing = await prisma.user.findUnique({
-      where: { name },
-    });
+    const { data: existing, error: checkError } = await supabase
+      .from("user")
+      .select("name")
+      .eq("name", name)
+      .single();
 
+    if (checkError && checkError.code !== "PGRST116") throw checkError;
     if (existing) {
       return res.json({ success: false, message: "Username already exists." });
     }
 
     const hashedPassword = simpleHash(password);
-    await prisma.user.create({
-      data: { name, password: hashedPassword, role },
+    const { error } = await supabase.from("user").insert({
+      name,
+      password: hashedPassword,
+      role,
     });
+    if (error) throw error;
 
-    res.json({ success: true, message: `User '${name}' created successfully as ${role}.` });
+    res.json({
+      success: true,
+      message: `User '${name}' created successfully as ${role}.`,
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -309,12 +376,22 @@ apiRouter.post("/users", async (req, res) => {
 // GET currently enabled winning patterns
 apiRouter.get("/winning-patterns", async (req, res) => {
   try {
-    if (!process.env.DATABASE_URL && !process.env.DIRECT_URL) {
-      return res.json(["Any Line", "Two Lines", "X Pattern", "Rectangle", "Four Corners", "Full House"]);
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+      return res.json([
+        "Any Line",
+        "Two Lines",
+        "X Pattern",
+        "Rectangle",
+        "Four Corners",
+        "Full House",
+      ]);
     }
-    const setting = await prisma.setting.findUnique({
-      where: { key: "enabled_winning_patterns" },
-    });
+    const { data: setting, error } = await supabase
+      .from("setting")
+      .select("value")
+      .eq("key", "enabled_winning_patterns")
+      .single();
+    if (error && error.code !== "PGRST116") throw error;
     if (setting) {
       try {
         const patterns = JSON.parse(setting.value);
@@ -325,10 +402,27 @@ apiRouter.get("/winning-patterns", async (req, res) => {
         console.error("Parsing winning patterns failed:", e);
       }
     }
-    res.json(["Any Line", "Two Lines", "X Pattern", "Rectangle", "Four Corners", "Full House"]);
+    res.json([
+      "Any Line",
+      "Two Lines",
+      "X Pattern",
+      "Rectangle",
+      "Four Corners",
+      "Full House",
+    ]);
   } catch (err: any) {
-    console.error("Database query failed for winning patterns, returning fallback defaults:", err);
-    res.json(["Any Line", "Two Lines", "X Pattern", "Rectangle", "Four Corners", "Full House"]);
+    console.error(
+      "Database query failed for winning patterns, returning fallback defaults:",
+      err,
+    );
+    res.json([
+      "Any Line",
+      "Two Lines",
+      "X Pattern",
+      "Rectangle",
+      "Four Corners",
+      "Full House",
+    ]);
   }
 });
 
@@ -337,20 +431,25 @@ apiRouter.post("/game-logs/clear", async (req, res) => {
   try {
     const { olderThanDays } = req.body;
     let deletedCount = 0;
+
     if (olderThanDays) {
       const date = new Date();
       date.setDate(date.getDate() - parseInt(olderThanDays));
-      const result = await prisma.gameLog.deleteMany({
-        where: {
-          created_at: {
-            lt: date,
-          },
-        },
-      });
-      deletedCount = result.count;
+      const { error, count } = await supabase
+        .from("gameLog")
+        .delete()
+        .lt("created_at", date.toISOString())
+        .select("*", { count: "exact" });
+      if (error) throw error;
+      deletedCount = count || 0;
     } else {
-      const result = await prisma.gameLog.deleteMany({});
-      deletedCount = result.count;
+      const { error, count } = await supabase
+        .from("gameLog")
+        .delete()
+        .gte("created_at", "1900-01-01")
+        .select("*", { count: "exact" });
+      if (error) throw error;
+      deletedCount = count || 0;
     }
     const message = olderThanDays
       ? `Successfully cleared ${deletedCount} game logs older than ${olderThanDays} days.`
